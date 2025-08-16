@@ -3,14 +3,10 @@ import torch.nn as nn
 from torch_geometric.utils import negative_sampling
 import torch.optim as optim
 import torch.nn.functional as F
-
+from sklearn.metrics import f1_score,precision_score,recall_score,accuracy_score
 
 class Client:
     def __init__(self, client_id, data, feature_encoder, structure_encoders, decoder, device, lr=1e-4, weight_decay=1e-5):
-        """
-        初始化客户端。
-        - structure_encoders: 多个结构通道编码器的列表
-        """
         self.client_id = client_id
         self.data = data.to(device)
         self.feature_encoder = feature_encoder.to(device)
@@ -24,10 +20,10 @@ class Client:
 
         self.optimizer = optim.Adam(params, lr=lr, weight_decay=weight_decay)
 
+        # 初始化结构特征缓存
+        self.extract_structure_features()
+
     def get_parameters(self):
-        """
-        返回客户端当前模型的参数（包括特征通道和所有结构通道的编码器、解码器）。
-        """
         return {
             "feature_encoder": self.feature_encoder.state_dict(),
             "structure_encoders": [enc.state_dict() for enc in self.structure_encoders],
@@ -35,9 +31,6 @@ class Client:
         }
 
     def set_parameters(self, parameters):
-        """
-        从服务器下发参数并更新本地模型。
-        """
         self.feature_encoder.load_state_dict(parameters["feature_encoder"])
         for enc, enc_params in zip(self.structure_encoders, parameters["structure_encoders"]):
             enc.load_state_dict(enc_params)
@@ -45,7 +38,8 @@ class Client:
 
     def extract_structure_features(self):
         """
-        根据本地图数据提取并融合多种结构特征。
+        提取结构特征，并缓存到 self.data.structure_x。
+        训练阶段直接复用，无需重复计算。
         """
         struct_features = []
         for enc in self.structure_encoders:
@@ -55,20 +49,17 @@ class Client:
     def local_train(self, epochs):
         self.feature_encoder.train()
         for enc in self.structure_encoders:
-            enc.train()
+            enc.eval()  # 结构编码器不再训练，使用缓存
         self.decoder.train()
+
+        # 缓存的结构特征
+        z_struct = self.data.structure_x  # [N, sum(d_i)]
 
         for _ in range(epochs):
             self.optimizer.zero_grad()
 
             # 特征通道
             z_feat = self.feature_encoder(self.data.x, self.data.edge_index)  # [N, d_f]
-
-            # 结构通道（多编码器融合）
-            struct_features = []
-            for enc in self.structure_encoders:
-                struct_features.append(enc(self.data))  # [N, d_i]
-            z_struct = torch.cat(struct_features, dim=1)  # [N, sum(d_i)]
 
             # 融合特征和结构
             z = torch.cat([z_feat, z_struct], dim=1)  # [N, d_f + sum(d_i)]
@@ -96,6 +87,54 @@ class Client:
             loss.backward()
             self.optimizer.step()
 
-    def evaluate(self):
-        pass
+    def evaluate(self, use_test=False):
+        """
+        在验证集或测试集上评估当前客户端模型。
+        Args:
+            use_test (bool): True 则使用测试集，否则使用验证集
+        Returns:
+            acc, recall, precision, f1
+        """
+        self.feature_encoder.eval()
+        for enc in self.structure_encoders:
+            enc.eval()
+        self.decoder.eval()
 
+        with torch.no_grad():
+            # 特征通道
+            z_feat = self.feature_encoder(self.data.x, self.data.edge_index)
+
+            # 结构通道
+            struct_features = []
+            for enc in self.structure_encoders:
+                struct_features.append(enc(self.data))
+            z_struct = torch.cat(struct_features, dim=1)
+
+            # 融合
+            z = torch.cat([z_feat, z_struct], dim=1)
+
+            # 选择验证集或测试集
+            if use_test:
+                pos_edge_index = self.data.test_pos_edge_index
+                neg_edge_index = self.data.test_neg_edge_index
+            else:
+                pos_edge_index = self.data.val_pos_edge_index
+                neg_edge_index = self.data.val_neg_edge_index
+
+            pos_out = self.decoder(z, pos_edge_index).sigmoid()
+            neg_out = self.decoder(z, neg_edge_index).sigmoid()
+
+            y_true = torch.cat([
+                torch.ones(pos_out.size(0), device=self.device),
+                torch.zeros(neg_out.size(0), device=self.device)
+            ])
+            y_pred = torch.cat([pos_out, neg_out])
+            y_pred_labels = (y_pred > 0.5).long()
+
+            # 计算评估指标
+            acc = accuracy_score(y_true.cpu(), y_pred_labels.cpu())
+            recall = recall_score(y_true.cpu(), y_pred_labels.cpu(), zero_division=0)
+            precision = precision_score(y_true.cpu(), y_pred_labels.cpu(), zero_division=0)
+            f1 = f1_score(y_true.cpu(), y_pred_labels.cpu(), zero_division=0)
+
+        return acc, recall, precision, f1
