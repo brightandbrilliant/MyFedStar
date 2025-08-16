@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch_geometric.utils import negative_sampling
 import torch.optim as optim
 import torch.nn.functional as F
 
@@ -52,13 +53,6 @@ class Client:
         self.data.structure_x = torch.cat(struct_features, dim=1)  # [N, sum(feature_dims)]
 
     def local_train(self, epochs):
-        """
-        在本地进行训练。
-        - 使用特征通道编码器对节点特征编码
-        - 使用多个结构通道编码器对结构特征编码
-        - 融合两个通道的嵌入后输入解码器
-        - 计算链接预测损失并更新模型参数
-        """
         self.feature_encoder.train()
         for enc in self.structure_encoders:
             enc.train()
@@ -76,21 +70,26 @@ class Client:
                 struct_features.append(enc(self.data))  # [N, d_i]
             z_struct = torch.cat(struct_features, dim=1)  # [N, sum(d_i)]
 
-            # 融合通道
+            # 融合特征和结构
             z = torch.cat([z_feat, z_struct], dim=1)  # [N, d_f + sum(d_i)]
 
-            # 链接预测
-            pos_edge_index = self.data.train_pos_edge_index
-            neg_edge_index = self.data.train_neg_edge_index
+            # 正负边索引
+            pos_edge_index = self.data.edge_index
+            neg_edge_index = negative_sampling(
+                edge_index=pos_edge_index,
+                num_nodes=self.data.num_nodes,
+                num_neg_samples=pos_edge_index.size(1)
+            )
 
-            pos_out = self.decoder(z, pos_edge_index)
-            neg_out = self.decoder(z, neg_edge_index)
+            # 按边取节点嵌入
+            pos_out = self.decoder(z[pos_edge_index[0]], z[pos_edge_index[1]])
+            neg_out = self.decoder(z[neg_edge_index[0]], z[neg_edge_index[1]])
 
-            # 损失函数（BCE）
+            # BCE Loss
             pos_label = torch.ones(pos_out.size(0), device=self.device)
             neg_label = torch.zeros(neg_out.size(0), device=self.device)
             loss = F.binary_cross_entropy_with_logits(
-                torch.cat([pos_out, neg_out]),
+                torch.cat([pos_out, neg_out]).view(-1),
                 torch.cat([pos_label, neg_label])
             )
 

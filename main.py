@@ -13,7 +13,7 @@ from Model.Structure_Encoder import DegreeEncoder, RWEncoder
 # =============================
 # 工具函数
 # =============================
-def split_client_data(data, val_ratio=0.1, test_ratio=0.1, device="cpu"):
+def split_client_data(data, val_ratio=0.1, test_ratio=0.1, device="cuda"):
     """
     对单个图数据划分 train/val/test 边。
     """
