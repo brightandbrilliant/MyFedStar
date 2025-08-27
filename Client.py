@@ -43,7 +43,7 @@ class Client:
         """
         struct_features = []
         for enc in self.structure_encoders:
-            struct_features.append(enc(self.data))
+            struct_features.append(enc(self.data).to(self.device))
         self.data.structure_x = torch.cat(struct_features, dim=1)  # [N, sum(feature_dims)]
 
     def local_train(self, epochs):
@@ -121,8 +121,8 @@ class Client:
                 pos_edge_index = self.data.val_pos_edge_index
                 neg_edge_index = self.data.val_neg_edge_index
 
-            pos_out = self.decoder(z, pos_edge_index).sigmoid()
-            neg_out = self.decoder(z, neg_edge_index).sigmoid()
+            pos_out = self.decoder(z[pos_edge_index[0]], z[pos_edge_index[1]]).sigmoid()
+            neg_out = self.decoder(z[neg_edge_index[0]], z[neg_edge_index[1]]).sigmoid()
 
             y_true = torch.cat([
                 torch.ones(pos_out.size(0), device=self.device),
